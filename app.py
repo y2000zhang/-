@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-# --- 核心逻辑函数 (复用并增强) ---
+# --- 核心逻辑函数 ---
 def load_data(uploaded_file):
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -25,17 +25,24 @@ def apply_winsorization(df, columns, limits=0.01):
     df_winsorized = df.copy()
     for col in columns:
         if pd.api.types.is_numeric_dtype(df_winsorized[col]):
-            valid_mask = df_winsorized[col].notnull()
-            df_winsorized.loc[valid_mask, col] = winsorize(  
-                df_winsorized.loc[valid_mask, col], 
-                limits=(limits, limits)
-            )
+            # 确保排除掉全为空的列
+            if df_winsorized[col].notnull().any():
+                valid_mask = df_winsorized[col].notnull()
+                # 修复点：移除了行尾可能存在的隐藏非法字符
+                df_winsorized.loc[valid_mask, col] = winsorize(
+                    df_winsorized.loc[valid_mask, col], 
+                    limits=(limits, limits)
+                )
     return df_winsorized
 
 # --- 增强：计算多重共线性 VIF ---
 def check_vif(df, variables):
-    if len(variables) < 2: return None
+    if len(variables) < 2: 
+        return None
+    # 必须先剔除含有缺失值的行，否则 VIF 会报错
     data = df[variables].dropna()
+    if data.empty:
+        return None
     # 增加常数项
     X = sm.add_constant(data)
     vif_data = pd.DataFrame()
@@ -48,7 +55,6 @@ def run_app():
     st.set_page_config(page_title="CSMAR 实证助手", layout="wide")
     st.title("📊 探索性数据分析 (EDA) 交互式平台")
     
-    # 初始化变量
     df = None
         
     with st.sidebar:
@@ -56,7 +62,6 @@ def run_app():
         uploaded_file = st.file_uploader("上传 CSMAR 数据 (CSV 或 XLSX)", type=['csv', 'xlsx'])
         winsor_pct = st.selectbox("双侧缩尾比例 (Winsorize)", [0, 0.01, 0.05], index=1)
         
-        # 只有上传文件后才显示变量选择
         if uploaded_file:
             df_raw = load_data(uploaded_file)
             if df_raw is not None:
@@ -65,7 +70,6 @@ def run_app():
                 st.header("2. 定义变量角色")
                 target_y = st.selectbox("因变量 (Y)", options=[None] + all_cols)
                 main_x = st.selectbox("核心解释变量 (X)", options=[None] + all_cols)
-                # 修复核心：将 all_cols 传给 multiselect
                 controls = st.multiselect("控制变量 (Controls)", options=all_cols)
                 
                 st.markdown("---")
@@ -73,9 +77,12 @@ def run_app():
                 iv_var = st.selectbox("工具变量 (IV, 可选)", options=[None] + all_cols)
                 m_var = st.selectbox("中介变量 (M, 可选)", options=[None] + all_cols)
                 
-                # 执行缩尾
+                # 执行缩尾处理
                 numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
-                df = apply_winsorization(df_raw, numeric_cols, limits=winsor_pct) if winsor_pct > 0 else df_raw
+                if winsor_pct > 0:
+                    df = apply_winsorization(df_raw, numeric_cols, limits=winsor_pct)
+                else:
+                    df = df_raw.copy()
     
     if uploaded_file and df is not None:
         tab1, tab2, tab3 = st.tabs(["📋 描述性统计", "📈 相关性分析", "🔍 专项诊断"])
@@ -92,7 +99,6 @@ def run_app():
                 
                 st.dataframe(stats.style.format("{:.3f}"))
                 
-                # 智能提示
                 for var in analysis_vars:
                     if abs(skew(df[var].dropna())) > 1:
                         st.warning(f"💡 变量 **{var}** 偏度过高，实证研究中通常建议对其取对数。")
@@ -100,23 +106,17 @@ def run_app():
                 st.info("请在左侧选择 Y 和 X 变量。")
 
         # --- Tab 2: 相关性分析 --- 
-        # 在原代码导入部分增加
-        
-# --- UI 增强 ---
-# 在 run_app() 的 Tab 2 增加内容        
         with tab2:
             if target_y and main_x:
-                # 1. 保持原有的散点图
                 st.subheader("一、核心关系探索")
                 col1, col2 = st.columns([2, 1])
                 with col1:
                     fig_scatter = px.scatter(df, x=main_x, y=target_y, trendline="ols", 
-                                           marginal_y="box", # 侧边增加箱线图
+                                           marginal_y="box",
                                            title=f"{main_x} 与 {target_y} 的分布与趋势",
                                            opacity=0.3)
                     st.plotly_chart(fig_scatter, use_container_width=True)
                 
-                # 2. 增加：全变量相关性热力图
                 st.markdown("---")
                 st.subheader("二、相关性矩阵与多重共线性")
                 all_selected = [v for v in [target_y, main_x] + controls if v]
@@ -132,12 +132,10 @@ def run_app():
                     
                     with col_vif:
                         st.markdown("#### 🛡️ 多重共线性 (VIF) 诊断")
-                        # 排除非数值型后计算
                         num_vars = df[all_selected].select_dtypes(include=[np.number]).columns.tolist()
                         vif_res = check_vif(df, num_vars)
                         if vif_res is not None:
                             st.dataframe(vif_res.style.format({"VIF": "{:.2f}"}))
-                            # 诊断标准
                             max_vif = vif_res['VIF'].max()
                             if max_vif > 10:
                                 st.error(f"警告：最大 VIF ({max_vif:.2f}) > 10，存在严重共线性风险！")
@@ -146,44 +144,43 @@ def run_app():
                             else:
                                 st.success("共线性诊断通过：所有变量 VIF 均处于安全范围。")
         
-                # 3. 增加：变量对比箱线图（检查缩尾效果）
                 st.markdown("---")
                 st.subheader("三、变量结构分析")
                 fig_box = px.box(df[all_selected], orientation="h", title="变量分布箱线图 (用于识别异常值)")
                 st.plotly_chart(fig_box, use_container_width=True)
-                st.info("💡 箱线图说明：若缩尾后仍存在大量远距离离群点，建议在实证模型中对该变量进行 Log 处理或更严格的缩尾。")
+            else:
+                st.info("请在左侧设置核心变量 X 和 Y。")
 
-        
         # --- Tab 3: 专项诊断 ---
         with tab3:
             st.subheader("学术专项诊断报告")
-            
-            # IV 诊断
             if iv_var and main_x:
                 st.markdown("#### 1. 工具变量 (IV) 强度检验")
-                data = df[[iv_var, main_x]].dropna()
-                model = sm.OLS(data[main_x], sm.add_constant(data[iv_var])).fit()
-                f_stat = model.fvalue
-                st.metric("第一阶段 F 统计量", f"{f_stat:.2f}")
-                if f_stat < 10:
-                    st.error("⚠️ F < 10：存在**弱工具变量**风险，IV 与 X 的相关性不足。")
-                else:
-                    st.success("✅ F > 10：初步排除了弱工具变量问题。")
+                data_iv = df[[iv_var, main_x]].dropna()
+                if not data_iv.empty:
+                    model_iv = sm.OLS(data_iv[main_x], sm.add_constant(data_iv[iv_var])).fit()
+                    f_stat = model_iv.fvalue
+                    st.metric("第一阶段 F 统计量", f"{f_stat:.2f}")
+                    if f_stat < 10:
+                        st.error("⚠️ F < 10：存在弱工具变量风险。")
+                    else:
+                        st.success("✅ F > 10：工具变量通过初步强度检验。")
             
-            # 中介分析提示
             if m_var and main_x and target_y:
                 st.markdown("#### 2. 中介效应 (Mediation) 初探")
                 st.info(f"正在分析路径：{main_x} ➔ {m_var} ➔ {target_y}")
-                r1, _ = pearsonr(df[main_x].dropna(), df[m_var].dropna())
-                r2, _ = pearsonr(df[m_var].dropna(), df[target_y].dropna())
-                st.write(f"- 路径 A ({main_x}➔{m_var}) 相关性: `{r1:.3f}`")
-                st.write(f"- 路径 B ({m_var}➔{target_y}) 相关性: `{r2:.3f}`")
+                data_m = df[[main_x, m_var, target_y]].dropna()
+                if not data_m.empty:
+                    r1, _ = pearsonr(data_m[main_x], data_m[m_var])
+                    r2, _ = pearsonr(data_m[m_var], data_m[target_y])
+                    st.write(f"- 路径 A ({main_x}➔{m_var}) 相关性: `{r1:.3f}`")
+                    st.write(f"- 路径 B ({m_var}➔{target_y}) 相关性: `{r2:.3f}`")
             
             if not iv_var and not m_var:
-                st.info("在左侧侧边栏选择 **工具变量** 或 **中介变量** 后，此处将自动显示学术检验结果。")
+                st.info("在左侧侧边栏选择工具变量或中介变量以开启诊断。")
 
     else:
-        st.info("👋 欢迎！请在左侧上传 CSMAR 数据文件并定义变量角色开始分析。")
+        st.info("👋 欢迎！请在左侧上传数据文件开始。")
 
 if __name__ == "__main__":
     run_app()
