@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.stats import winsorize, skew, kurtosis, pearsonr
+from scipy.stats import skew, kurtosis, pearsonr
+from scipy.stats.mstats import winsorize
 import statsmodels.api as sm
 from io import BytesIO
 import plotly.express as px
